@@ -1,0 +1,2 @@
+Version: 1.11.1
+Arguments: ['C:\\Users\\runneradmin\\AppData\\Local\\Temp\\cibw-run-wrao6p2k\\cp310-win_amd64\\build\\venv\\Scripts\\delvewheel', 'repair', '-w', 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\cibw-run-wrao6p2k\\cp310-win_amd64\\repaired_wheel', '--add-path', '.\\SDK_wrapper\\TittaMex\\mex', 'C:\\Users\\runneradmin\\AppData\\Local\\Temp\\cibw-run-wrao6p2k\\cp310-win_amd64\\built_wheel\\tittapy-2.0.0-cp310-cp310-win_amd64.whl']

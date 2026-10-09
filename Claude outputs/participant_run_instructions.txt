@@ -1,0 +1,139 @@
+EYE-TRACKING PIPELINE — HOW TO RUN A NEW PARTICIPANT
+=======================================================
+
+Folder: eye-tracking-integration
+Venv must be activated first:
+    .\venv\Scripts\Activate.ps1
+
+No code editing needed anymore — just pass the participant name as a
+command-line argument to each script. Same participant name must be used
+in all commands for a given participant.
+
+-------------------------------------------------------
+STEP 1 — Run calibration + recording (real hardware, Tobii Pro Nano)
+-------------------------------------------------------
+    python step2_calibration_recording.py participant_02
+
+(replace "participant_02" with whatever ID you want — participant_03,
+participant_04, etc. If you run it with no argument at all, it defaults
+to "participant_01".)
+
+What happens:
+  - Creates folder:      participant_02/
+  - Creates subfolder:   participant_02/participant_02_calibration/
+  - PsychoPy window opens fullscreen, calibration runs (5 targets)
+  - Right after calibration, the screen shows "Recording in progress...
+    Please look around the screen." and records gaze for 15 seconds
+  - IMPORTANT: let it run all the way through — do not close the window
+    or press Ctrl+C during calibration or during the 15-second recording.
+    Closing early means the .h5 file will be missing gaze data.
+  - Saves participant_02.h5 and participant_02.json into participant_02/
+  - Saves calibration/validation images + .cal file into
+    participant_02/participant_02_calibration/
+
+-------------------------------------------------------
+STEP 2 — Convert the recorded .h5 data to .tsv
+-------------------------------------------------------
+    python convert_h5_to_tsv.py participant_02
+
+What happens:
+  - Reads participant_02/participant_02.h5
+  - Writes participant_02/participant_02.tsv
+    (this is the file the analysis script needs)
+
+-------------------------------------------------------
+STEP 3 — Generate scanpath + heatmap
+-------------------------------------------------------
+    python step3_4_analyze_and_plot.py participant_02/participant_02.tsv participant_02
+
+Arguments explained:
+  1st argument = path to the .tsv file to analyze
+  2nd argument = label used for the output image filenames
+                 (since it's inside the same folder as the tsv, the
+                 images are saved into that same participant folder)
+
+What happens:
+  - Prints sample count, sampling rate, number of fixations found
+  - Saves scanpath_participant_02.png and heatmap_participant_02.png
+    into participant_02/
+
+-------------------------------------------------------
+STEP 4 — Live gaze viewer (real-time, optional — needs 2 computers)
+-------------------------------------------------------
+This step is separate from steps 1-3 above. It's not for processing a
+recording after the fact — it's for watching gaze live, in real time,
+from a second computer while participant is sitting and looking into the eye tracker.
+
+Setup: Tobii Pro Nano stays plugged into the SAME computer running the
+Python scripts (call this the "participant machine"). A second computer
+(the "admin machine") will watch the live gaze feed in a browser. Both
+computers must be on the same network (same WiFi, or a direct Ethernet
+cable between them).
+
+On the participant machine, start the live data server:
+    python step5_websocket_server.py
+
+You should see:
+    Server running at ws://localhost:8765
+
+Leave that terminal running — don't close it.
+
+Find the participant machine's IP address (run this in a separate
+terminal on the same machine):
+    ipconfig
+
+Look for "IPv4 Address" (e.g. 192.168.1.42) — that's the IP you'll type
+into the admin machine.
+
+On the admin machine, open this file in Chrome:
+    website/admin-dashboard/live-viewer/index.html
+
+Then:
+  - Type the participant machine's IP address into the "Participant IP"
+    field (leave Port as 8765)
+  - Click "Connect"
+  - A green dot should start moving on the canvas, following the gaze
+    of whoever is in front of the eye tracker
+
+If it won't connect:
+  - Make sure step5_websocket_server.py is actually running (start it
+    BEFORE clicking Connect on the admin machine)
+  - Double check the IP address is correct and both machines are on the
+    same network
+  - Windows Firewall on the participant machine may be blocking port
+    8765 — this is more likely if the network is set to "Public" instead
+    of "Private"
+
+-------------------------------------------------------
+FINAL RESULT — folder structure for this participant
+-------------------------------------------------------
+participant_02/
+    participant_02.h5
+    participant_02.json
+    participant_02.tsv
+    scanpath_participant_02.png
+    heatmap_participant_02.png
+    participant_02_calibration/
+        participant_02_1.cal
+        participant_02_calibration_image1.png
+        participant_02_validation_image1.png
+
+-------------------------------------------------------
+FOR THE NEXT PARTICIPANT (participant_03, participant_04, ...)
+-------------------------------------------------------
+Just repeat steps 1-3 with the new name, e.g.:
+
+    python step2_calibration_recording.py participant_03
+    python convert_h5_to_tsv.py participant_03
+    python step3_4_analyze_and_plot.py participant_03/participant_03.tsv participant_03
+
+Each participant gets their own separate folder — nothing gets
+overwritten as long as the name is different every time.
+
+-------------------------------------------------------
+OPTIONAL — adjustable settings (edit inside step3_4_analyze_and_plot.py)
+-------------------------------------------------------
+MIN_DUR_MS = 50          -> minimum gaze-still time (ms) to count as a fixation at all
+MIN_LABEL_DUR_MS = 200   -> minimum fixation duration (ms) to get a numbered circle
+                            on the scanpath image (shorter ones show as a small dot)
+MERGE_DIST_PX = 60       -> fixations closer than this (pixels) get merged into one

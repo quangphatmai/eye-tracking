@@ -1,0 +1,601 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# Part of the PsychoPy library
+# Copyright (C) 2002-2018 Jonathan Peirce (C) 2019-2025 Open Science Tools Ltd.
+# Distributed under the terms of the GNU General Public License (GPL).
+
+# Author: Jeremy R. Gray, 2012
+from pathlib import Path
+
+from psychopy import logging
+from psychopy.alerts import alert
+from psychopy.experiment.devices import DeviceBackend
+from psychopy.tools import stringtools as st, systemtools as syst, audiotools as at
+from psychopy.experiment.components import (
+    BaseComponent, BaseDeviceComponent, Param, getInitVals, _translate
+)
+
+
+class MicrophoneComponent(BaseDeviceComponent):
+    """An event class for capturing short sound stimuli"""
+    categories = ['Responses']
+    targets = ['PsychoPy', 'PsychoJS']
+    version = "2021.2.0"
+    iconFile = Path(__file__).parent / 'microphone.png'
+    iconSVG = Path(__file__).parent / 'MicrophoneComponent.svg'
+    tooltip = _translate('Microphone: basic sound capture (fixed onset & '
+                         'duration), okay for spoken words')
+
+    # dict of available transcribers (plugins can add entries to this)
+    localTranscribers = {
+        "Google": "google",
+    }
+    onlineTranscribers = {
+        "Google": "google",
+    }
+    # dict mapping transcriber names to importable paths
+    transcriberPaths = {
+        'google': "psychopy.sound.transcribe:GoogleCloudTranscriber"
+    }
+    legacyParams = [
+        # old device setup params, no longer needed as this is handled by DeviceManager
+        "device",
+        "exclusive",
+        "sampleRate",
+        "channels",
+        "stereo",
+        "channel",
+        "maxSize"
+    ]
+
+    def __init__(
+        self, exp, parentName, name='mic',
+        startType='time (s)', startVal=0.0,
+        stopType='duration (s)', stopVal=2.0,
+        startEstim='', durationEstim='',
+        outputType='default', speakTimes=False, trimSilent=False,
+        policyWhenFull='warn',
+        transcribe=False, transcribeBackend="none",
+        transcribeLang="en-US", transcribeWords="",
+        transcribeWhisperModel="base",
+        transcribeWhisperDevice="auto",
+        #legacy
+        device=None,
+        exclusive=False,
+        sampleRate=48000, 
+        channels=2,
+        stereo=None, 
+        channel=None
+    ):
+        super(MicrophoneComponent, self).__init__(
+            exp, parentName, name=name,
+            startType=startType, startVal=startVal,
+            stopType=stopType, stopVal=stopVal,
+            startEstim=startEstim, durationEstim=durationEstim)
+
+        self.type = 'Microphone'
+        self.url = "https://www.psychopy.org/builder/components/microphone.html"
+        self.exp.requirePsychopyLibs(['sound'])
+
+        self.order += []
+
+        self.params['stopType'].allowedVals = ['duration (s)']
+        msg = _translate(
+            'The duration of the recording in seconds; blank = 0 sec')
+        self.params['stopType'].hint = msg
+
+        # --- Data params ---
+        msg = _translate(
+            "What file type should output audio files be saved as?")
+        self.params['outputType'] = Param(
+            outputType, valType='code', inputType='choice', categ='Data',
+            allowedVals=["default"] + at.AUDIO_SUPPORTED_CODECS,
+            hint=msg,
+            label=_translate("Output file type")
+        )
+        self.params['policyWhenFull'] = Param(
+            policyWhenFull, valType="str", inputType="choice", categ="Data",
+            updates="set every repeat",
+            allowedVals=["warn", "roll", "error"],
+            allowedLabels=[
+                _translate("Discard incoming data"), 
+                _translate("Clear oldest data"), 
+                _translate("Raise error"),
+            ],
+            label=_translate("Full buffer policy"),
+            hint=_translate(
+                "What to do when we reach the max amount of audio data which can be safely stored "
+                "in memory?"
+            )
+        )
+        msg = _translate(
+            "Tick this to save times when the participant starts and stops speaking")
+        self.params['speakTimes'] = Param(
+            speakTimes, valType='bool', inputType='bool', categ='Transcription',
+            hint=msg,
+            label=_translate("Speaking start / stop times")
+        )
+
+        msg = _translate(
+            "Trim periods of silence from the output file")
+        self.params['trimSilent'] = Param(
+            trimSilent, valType='bool', inputType='bool', categ='Data',
+            hint=msg,
+            label=_translate("Trim silent")
+        )
+
+        # Transcription params
+        self.order += [
+            'transcribe',
+            'transcribeBackend',
+            'transcribeLang',
+            'transcribeWords',
+        ]
+        self.params['transcribe'] = Param(
+            transcribe, valType='bool', inputType='bool', categ='Transcription',
+            hint=_translate("Whether to transcribe the audio recording and store the transcription"),
+            label=_translate("Transcribe audio")
+        )
+
+        # whisper specific params
+        whisperParams = [
+            'transcribeBackend', 
+            'transcribeLang', 
+            'transcribeWords', 
+            'transcribeWhisperModel',
+            'transcribeWhisperDevice',
+            'speakTimes'
+        ]
+
+        for depParam in whisperParams:
+            self.depends.append({
+                "dependsOn": "transcribe",
+                "condition": "==True",
+                "param": depParam,
+                "true": "enable",  # what to do with param if condition is True
+                "false": "disable",  # permitted: hide, show, enable, disable
+            })
+
+        self.params['transcribeBackend'] = Param(
+            transcribeBackend, valType='code', inputType='choice', categ='Transcription',
+            allowedVals=list(self.allTranscribers.values()),
+            allowedLabels=list(self.allTranscribers),
+            direct=False,
+            hint=_translate("What transcription service to use to transcribe audio?"),
+            label=_translate("Transcription backend")
+        )
+
+        self.params['transcribeLang'] = Param(
+            transcribeLang, valType='str', inputType='single', categ='Transcription',
+            hint=_translate("What language you expect the recording to be spoken in, e.g. en-US for English"),
+            label=_translate("Transcription language")
+        )
+        self.depends.append({
+            "dependsOn": "transcribeBackend",
+            "condition": "=='google'",
+            "param": "transcribeLang",
+            "true": "show",  # what to do with param if condition is True
+            "false": "hide",  # permitted: hide, show, enable, disable
+        })
+
+        self.params['transcribeWords'] = Param(
+            transcribeWords, valType='list', inputType='single', categ='Transcription',
+            hint=_translate("Set list of words to listen for - if blank will listen for all words in chosen language. \n\n"
+                            "If using the built-in transcriber, you can set a minimum % confidence level using a colon "
+                            "after the word, e.g. 'red:100', 'green:80'. Otherwise, default confidence level is 80%."),
+            label=_translate("Expected words")
+        )
+        self.depends.append({
+            "dependsOn": "transcribeBackend",
+            "condition": "=='google'",
+            "param": "transcribeWords",
+            "true": "show",  # what to do with param if condition is True
+            "false": "hide",  # permitted: hide, show, enable, disable
+        })
+
+        self.params['transcribeWhisperModel'] = Param(
+            transcribeWhisperModel, valType='code', inputType='choice', categ='Transcription',
+            allowedVals=["tiny", "base", "small", "medium", "large", "tiny.en", "base.en", "small.en", "medium.en"],
+            hint=_translate(
+                "Which model of Whisper AI should be used for transcription? Details of each model are available here at github.com/openai/whisper"),
+            label=_translate("Whisper model")
+        )
+        self.depends.append({
+            "dependsOn": "transcribeBackend",
+            "condition": "=='Whisper'",
+            "param": "transcribeWhisperModel",
+            "true": "show",  # what to do with param if condition is True
+            "false": "hide",  # permitted: hide, show, enable, disable
+        })
+        self.depends.append({
+            "dependsOn": "transcribeBackend",
+            "condition": "=='Whisper'",
+            "param": "speakTimes",
+            "true": "show",  # what to do with param if condition is True
+            "false": "hide",  # permitted: hide, show, enable, disable
+        })
+        # settings for whisper we might want, we'll need to get these from the
+        # plugin itself at some point
+        self.params['transcribeWhisperDevice'] = Param(
+            transcribeWhisperDevice, valType='code', inputType='choice', 
+            categ='Transcription',
+            allowedVals=["auto", "gpu", "cpu"],
+            hint=_translate(
+                "Which device to use for transcription?"),
+            label=_translate("Whisper device")
+        )
+        self.depends.append({
+            "dependsOn": "transcribeBackend",
+            "condition": "=='Whisper'",
+            "param": "transcribeWhisperDevice",
+            "true": "show",  # what to do with param if condition is True
+            "false": "hide",  # permitted: hide, show, enable, disable
+        })
+    
+    @property
+    def allTranscribers(self):
+        """
+        Dict of all available transcribers (combines MicrophoneComponent.localTranscribers and 
+        MicrophoneComponent.onlineTranscribers)
+        """
+        return {'None': "none", **self.localTranscribers, **self.onlineTranscribers}
+
+    def writeStartCode(self, buff):
+        inits = getInitVals(self.params)
+        # Use filename with a suffix to store recordings
+        code = (
+            "# Make folder to store recordings from %(name)s\n"
+            "%(name)sRecFolder = filename + '_%(name)s_recorded'\n"
+            "if not os.path.isdir(%(name)sRecFolder):\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(1, relative=True)
+        code = (
+                "os.mkdir(%(name)sRecFolder)\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(-1, relative=True)
+
+    def writeStartCodeJS(self, buff):
+        inits = getInitVals(self.params)
+        code = (
+            "// Define folder to store recordings from %(name)s"
+            "%(name)sRecFolder = filename + '_%(name)s_recorded"
+        )
+        buff.writeIndentedLines(code % inits)
+
+    def writeRunOnceInitCode(self, buff):
+        inits = getInitVals(self.params)
+        # get transcriber path
+        if inits['transcribeBackend'].val in MicrophoneComponent.transcriberPaths:
+            inits['transcriberPath'] = MicrophoneComponent.transcriberPaths[inits['transcribeBackend'].val]
+        else:
+            inits['transcriberPath'] = inits['transcribeBackend'].val
+        # check if the user wants to do transcription
+        if inits['transcribe'].val:
+            code = (
+                "# Setup speech-to-text transcriber for audio recordings\n"
+                "from psychopy.sound.transcribe import setupTranscriber\n"
+                "setupTranscriber(\n"
+                "    '%(transcriberPath)s'")
+        
+            # handle advanced config options
+            if inits['transcribeBackend'].val == 'Whisper':
+                code += (
+                    ",\n    config={'device': '%(transcribeWhisperDevice)s'})\n")
+            else:
+                code += (")\n")
+
+            buff.writeOnceIndentedLines(code % inits)
+
+    def writeInitCode(self, buff):
+        inits = getInitVals(self.params)
+        if inits['outputType'].val == 'default':
+            inits['outputType'].val = 'wav'
+        # Assign name to device var name
+        code = (
+            "# make microphone object for %(name)s\n"
+            "%(name)s = sound.microphone.Microphone(\n"
+            "    device=%(deviceLabel)s,\n"
+            "    name='%(name)s',\n"
+            "    recordingFolder=%(name)sRecFolder,\n"
+            "    recordingExt='%(outputType)s'\n"
+            ")\n"
+            "# tell the experiment handler to save this Microphone's clips if the experiment is "
+            "force ended\n"
+            "runAtExit.append(%(name)s.saveClips)\n"
+            "# connect camera save method to experiment handler so it's called when data saves\n"
+            "thisExp.connectSaveMethod(%(name)s.saveClips)\n"
+        )
+        buff.writeIndentedLines(code % inits)
+
+    def writeInitCodeJS(self, buff):
+        inits = getInitVals(self.params)
+        # Alert user if non-default value is selected for device
+        if inits['deviceLabel'].val not in (None, "", 'None'):
+            alert(5055, strFields={'name': inits['name'].val})
+        # Write code
+        code = (
+            "%(name)s = new sound.Microphone({\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(1, relative=True)
+        code = (
+                "win : psychoJS.window, \n"
+                "name:'%(name)s',\n"
+                "loopback : true,\n"
+                "policyWhenFull : 'ignore',\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+            "});\n"
+        )
+        buff.writeIndentedLines(code % inits)
+
+    def writeFrameCode(self, buff):
+        """Write the code that will be called every frame"""
+        inits = getInitVals(self.params)
+        inits['routine'] = self.parentName
+
+        # Start the recording
+        indented = self.writeStartTestCode(buff)
+        if indented:
+            code = (
+                "# start recording with %(name)s\n"
+                "%(name)s.start()\n"
+            )
+            buff.writeIndentedLines(code % self.params)
+        buff.setIndentLevel(-indented, relative=True)
+
+        # Get clip each frame
+        indented = self.writeActiveTestCode(buff)
+        code = (
+                "# update recorded clip for %(name)s\n"
+                "%(name)s.poll()\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+        buff.setIndentLevel(-indented, relative=True)
+
+        # Stop recording
+        indented = self.writeStopTestCode(buff)
+        if indented:
+            code = (
+                "# stop recording with %(name)s\n"
+                "%(name)s.stop()\n"
+            )
+            buff.writeIndentedLines(code % self.params)
+        buff.setIndentLevel(-indented, relative=True)
+
+    def writeFrameCodeJS(self, buff):
+        inits = getInitVals(self.params)
+        inits['routine'] = self.parentName
+        # Start the recording
+        self.writeStartTestCodeJS(buff)
+        code = (
+                "await %(name)s.start();\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+            "}"
+        )
+        buff.writeIndentedLines(code % inits)
+        if self.params['stopVal'].val not in ['', None, -1, 'None']:
+            # Stop the recording
+            self.writeStopTestCodeJS(buff)
+            code = (
+                    "%(name)s.pause();\n"
+            )
+            buff.writeIndentedLines(code % inits)
+            buff.setIndentLevel(-1, relative=True)
+            code = (
+                "}"
+            )
+            buff.writeIndentedLines(code % inits)
+
+    def writeRoutineEndCode(self, buff):
+        inits = getInitVals(self.params)
+        # Alter inits
+        if len(self.exp.flow._loopList):
+            inits['loop'] = self.exp.flow._loopList[-1].params['name']
+            inits['filename'] = f"'recording_{inits['name']}_{inits['loop']}_%s.{inits['outputType']}' % {inits['loop']}.thisTrialN"
+        else:
+            inits['loop'] = "thisExp"
+            inits['filename'] = f"'recording_{inits['name']}'"
+        transcribe = inits['transcribe'].val
+        if inits['transcribe'].val == False:
+            inits['transcribeBackend'].val = None
+        # Warn user if their transcriber won't work locally
+        if inits['transcribe'].val:
+            if  self.params['transcribeBackend'].val not in self.localTranscribers.values():
+                default = list(self.localTranscribers.values())[0]
+                alert(4610, strFields={"transcriber": inits['transcribeBackend'].val, "default": default})
+        # Store recordings from this routine
+        code = (
+            "# tell mic to keep hold of current recording in %(name)s.clips and transcript (if applicable) in %(name)s.scripts\n"
+            "# this will also update %(name)s.lastClip and %(name)s.lastScript\n"
+            "%(name)s.stop()\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        if inits['transcribeBackend'].val:
+            code = (
+                "tag = data.utils.getDateStr()\n"
+                "%(name)sClip, %(name)sScript = %(name)s.bank(\n"
+            )
+        else:
+            code = (
+                "tag = data.utils.getDateStr()\n"
+                "%(name)sClip = %(name)s.bank(\n"
+            )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(1, relative=True)
+        code = (
+            "tag=tag, transcribe='%(transcribeBackend)s',\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        if transcribe:
+            code = (
+                "language=%(transcribeLang)s, expectedWords=%(transcribeWords)s\n"
+            )
+        else:
+            code = (
+                "config=None\n"
+            )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+            ")\n"
+            "%(loop)s.addData(\n"
+            "    '%(name)s.clip', %(name)s.recordingFolder / %(name)s.getClipFilename(tag)\n"
+            ")"
+        )
+        buff.writeIndentedLines(code % inits)
+        if transcribe:
+            code = (
+                "%(loop)s.addData('%(name)s.script', %(name)sScript)\n"
+            )
+            buff.writeIndentedLines(code % inits)
+        if inits['speakTimes'] and inits['transcribeBackend'].val == "Whisper":
+
+            code = (
+                "# save transcription data\n"
+                "with open(os.path.join(%(name)sRecFolder, 'recording_%(name)s_%%s.json' %% tag), 'w') as fp:\n"
+                "    fp.write(%(name)sScript.response)\n"
+                "# save speaking start/stop times\n"
+                "%(name)sSpeechInterval = %(name)s.lastScript.getSpeechInterval()\n"
+                "%(name)sSpeechOnset = %(name)sSpeechInterval[0]\n"
+                "%(name)sSpeechOffset = %(name)sSpeechInterval[1]\n"
+                "thisExp.addData('%(name)s.speechStart', %(name)sSpeechOnset)\n"
+                "thisExp.addData('%(name)s.speechEnd', %(name)sSpeechOffset)\n"
+            )
+            buff.writeIndentedLines(code % inits)
+        # Write base end routine code
+        BaseComponent.writeRoutineEndCode(self, buff)
+
+    def writeRoutineEndCodeJS(self, buff):
+        inits = getInitVals(self.params)
+        inits['routine'] = self.parentName
+        if self.params['transcribeBackend'].val in self.allTranscribers:
+            inits['transcribeBackend'].val = self.allTranscribers[self.params['transcribeBackend'].val]
+        # Warn user if their transcriber won't work online
+        if inits['transcribe'].val and inits['transcribeBackend'].val not in self.onlineTranscribers.values():
+            default = list(self.onlineTranscribers.values())[0]
+            alert(4605, strFields={"transcriber": inits['transcribeBackend'].val, "default": default})
+
+        # Write base end routine code
+        BaseComponent.writeRoutineEndCodeJS(self, buff)
+        # Store recordings from this routine
+        code = (
+            "// stop the microphone (make the audio data ready for upload)\n"
+            "await %(name)s.stop();\n"
+            "// construct a filename for this recording\n"
+            "thisFilename = 'recording_%(name)s_' + currentLoop.name + '_' + currentLoop.thisN\n"
+            "// get the recording\n"
+            "%(name)s.lastClip = await %(name)s.getRecording({\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(1, relative=True)
+        code = (
+                "tag: thisFilename + '_' + util.MonotonicClock.getDateStr(),\n"
+                "flush: false\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        buff.setIndentLevel(-1, relative=True)
+        code = (
+            "});\n"
+            "psychoJS.experiment.addData('%(name)s.clip', thisFilename);\n"
+            "// start the asynchronous upload to the server\n"
+            "%(name)s.lastClip.upload();\n"
+        )
+        buff.writeIndentedLines(code % inits)
+        if self.params['transcribe'].val:
+            code = (
+                "// transcribe the recording\n"
+                "const transcription = await %(name)s.lastClip.transcribe({\n"
+            )
+            buff.writeIndentedLines(code % inits)
+            buff.setIndentLevel(1, relative=True)
+            code = (
+                    "languageCode: %(transcribeLang)s,\n"
+                    "engine: sound.AudioClip.Engine.%(transcribeBackend)s,\n"
+                    "wordList: %(transcribeWords)s\n"
+            )
+            buff.writeIndentedLines(code % inits)
+            buff.setIndentLevel(-1, relative=True)
+            code = (
+                "});\n"
+                "%(name)s.lastScript = transcription.transcript;\n"
+                "%(name)s.lastConf = transcription.confidence;\n"
+                "psychoJS.experiment.addData('%(name)s.transcript', %(name)s.lastScript);\n"
+                "psychoJS.experiment.addData('%(name)s.confidence', %(name)s.lastConf);\n"
+            )
+            buff.writeIndentedLines(code % inits)
+
+    def writeExperimentEndCode(self, buff):
+        """Write the code that will be called at the end of
+        an experiment (e.g. save log files or reset hardware)
+        """
+        inits = getInitVals(self.params)
+        if len(self.exp.flow._loopList):
+            currLoop = self.exp.flow._loopList[-1]  # last (outer-most) loop
+        else:
+            currLoop = self.exp._expHandler
+        inits['loop'] = currLoop.params['name']
+        if inits['outputType'].val == 'default':
+            inits['outputType'].val = 'wav'
+        # Save recording
+        code = (
+            "# save %(name)s recordings\n"
+            "%(name)s.saveClips()\n"
+        )
+        buff.writeIndentedLines(code % inits)
+
+
+class MicrophoneDeviceBackend(DeviceBackend):
+    # name of this backend to display in Device Manager
+    backendLabel = "Microphone"
+    # class of the device which this backend corresponds to
+    deviceClass = "psychopy.hardware.microphone.MicrophoneDevice"
+    # icon to show in device manager
+    icon = "light/microphone.png"
+
+    def __init__(self, profile):
+        # init parent class
+        DeviceBackend.__init__(self, profile)
+
+        # add params
+        self.order += [
+            "exclusive",
+        ]
+        self.params['exclusive'] = Param(
+            False, valType="code", inputType="bool",
+            label=_translate("Exclusive control"),
+            hint=_translate(
+                "Take exclusive control of the microphone, so other apps can't use it during your "
+                "experiment."
+            )
+        )
+    
+    def writeDeviceCode(self, buff):
+        """
+        Code to setup a device with this backend.
+
+        Parameters
+        ----------
+        buff : io.StringIO
+            Text buffer to write code to.
+        """
+        # write basic code
+        self.writeBaseDeviceCode(buff, close=False)
+        # add exclusive param and close
+        code = (
+            "    exclusive=%(exclusive)s,\n"
+            ")\n"
+        )
+        buff.writeIndentedLines(code % self.params)
+
+
+# register backend with Component
+MicrophoneComponent.registerBackend(MicrophoneDeviceBackend)
