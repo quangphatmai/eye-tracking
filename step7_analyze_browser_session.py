@@ -8,7 +8,7 @@ sys.path.append("PyGazeAnalyser")
 from pygazeanalyser.detectors import fixation_detection
 
 # ================= CẤU HÌNH =================
-PARTICIPANT_DIR = "participant_04"   # đổi đúng folder participant mới nhất
+PARTICIPANT_DIR = "participant_06"   # đổi đúng folder participant mới nhất
 
 GAZE_CSV = f"{PARTICIPANT_DIR}/gaze_data.csv"
 FRAME_LOG = f"{PARTICIPANT_DIR}/frame_log.csv"
@@ -100,6 +100,13 @@ out_heatmap = cv2.VideoWriter(VIDEO_OUT_HEATMAP, fourcc, src_fps, (frame_w, fram
 # Bản đồ nhiệt tích lũy — tồn tại xuyên suốt TOÀN BỘ video, không reset giữa frame
 heat_accum = np.zeros((frame_h, frame_w), dtype=np.float32)
 
+# "Con dấu" nhiệt mềm — tạo 1 LẦN duy nhất ở đây, không tạo lại/blur lại mỗi frame
+stamp_size = HEATMAP_RADIUS * 2 + HEATMAP_BLUR_KSIZE
+stamp = np.zeros((stamp_size, stamp_size), dtype=np.float32)
+cv2.circle(stamp, (stamp_size // 2, stamp_size // 2), HEATMAP_RADIUS, 1.0, -1)
+stamp = cv2.GaussianBlur(stamp, (HEATMAP_BLUR_KSIZE, HEATMAP_BLUR_KSIZE), 0)
+stamp_half = stamp_size // 2
+
 frame_idx = 0
 while True:
     ret, frame = cap.read()
@@ -112,7 +119,7 @@ while True:
         gx = int(np.interp(frame_time, t_valid, x_valid))
         gy = int(np.interp(frame_time, t_valid, y_valid))
 
-    # ===== 1. Video chấm + vệt mờ — giữ nguyên bản cũ =====
+    # ===== 1. Video chấm + vệt mờ — bản tối ưu, chỉ xử lý vùng nhỏ quanh chấm =====
     frame_dot = frame.copy()
     for step in range(TRAIL_STEPS, 0, -1):
         sample_time = frame_time - (TRAIL_SECONDS * step / TRAIL_STEPS)
@@ -122,9 +129,15 @@ while True:
         sy = int(np.interp(sample_time, t_valid, y_valid))
         alpha = 1.0 - (step / TRAIL_STEPS)
         radius = max(3, int(DOT_RADIUS * (0.4 + 0.6 * alpha)))
-        overlay = frame_dot.copy()
-        cv2.circle(overlay, (sx, sy), radius, (0, 255, 0), -1)
-        frame_dot = cv2.addWeighted(overlay, alpha * 0.5, frame_dot, 1 - alpha * 0.5, 0)
+
+        x0, x1 = max(0, sx - radius - 2), min(frame_w, sx + radius + 2)
+        y0, y1 = max(0, sy - radius - 2), min(frame_h, sy + radius + 2)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        roi = frame_dot[y0:y1, x0:x1]
+        overlay_roi = roi.copy()
+        cv2.circle(overlay_roi, (sx - x0, sy - y0), radius, (0, 255, 0), -1)
+        frame_dot[y0:y1, x0:x1] = cv2.addWeighted(overlay_roi, alpha * 0.5, roi, 1 - alpha * 0.5, 0)
 
     if has_gaze_now:
         radius = FIXATION_RADIUS if is_in_fixation(frame_time) else DOT_RADIUS
@@ -138,12 +151,19 @@ while True:
     # (a) Làm mờ dần toàn bộ bản đồ nhiệt — vùng cũ tự nhạt đi nếu mắt rời khỏi đó
     heat_accum *= HEATMAP_DECAY
 
-    # (b) Cộng thêm nhiệt mới tại gaze hiện tại (nếu frame này có dữ liệu hợp lệ)
+    # (b) Cộng thêm nhiệt mới tại gaze hiện tại — dùng lại "con dấu" đã tạo sẵn, không blur lại
     if has_gaze_now and 0 <= gx < frame_w and 0 <= gy < frame_h:
-        heat_layer = np.zeros((frame_h, frame_w), dtype=np.float32)
-        cv2.circle(heat_layer, (gx, gy), HEATMAP_RADIUS, 1.0, -1)
-        heat_layer = cv2.GaussianBlur(heat_layer, (HEATMAP_BLUR_KSIZE, HEATMAP_BLUR_KSIZE), 0)
-        heat_accum += heat_layer * HEATMAP_GAIN
+        y0 = gy - stamp_half
+        y1 = y0 + stamp_size      # luôn đúng = stamp_size, không dùng gy + stamp_half nữa
+        x0 = gx - stamp_half
+        x1 = x0 + stamp_size
+        sy0, sy1 = max(0, y0), min(frame_h, y1)
+        sx0, sx1 = max(0, x0), min(frame_w, x1)
+        if sy1 > sy0 and sx1 > sx0:
+            heat_accum[sy0:sy1, sx0:sx1] += (
+                stamp[sy0 - y0 : stamp_size - (y1 - sy1), sx0 - x0 : stamp_size - (x1 - sx1)]
+                * HEATMAP_GAIN
+            )
 
     # (c) Chuẩn hoá về 0..1 theo mức cap cố định (để màu không chớp giữa các frame)
     heat_norm = np.clip(heat_accum / HEATMAP_CAP, 0.0, 1.0)

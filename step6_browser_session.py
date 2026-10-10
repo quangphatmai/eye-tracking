@@ -30,7 +30,7 @@ SCREEN_W, SCREEN_H = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 print(f"Độ phân giải màn hình thật (vật lý): {SCREEN_W}x{SCREEN_H}")
 
 TARGET_URL = "https://www.uvu.edu"
-SESSION_SECONDS = 15
+SESSION_SECONDS = 60
 COUNTDOWN_SECONDS = 5
 TOBII_MODEL = "Tobii Pro Nano"
 RECORDING_FPS = 15   # fps ghi màn hình — 15 là mức an toàn, đủ mượt cho mục đích xem lại gaze
@@ -64,7 +64,7 @@ settings.N_CAL_TARGETS = 9
 tracker = Titta.Connect(settings)
 tracker.init()
 
-win = visual.Window(monitor="testMonitor", fullscr=True, units="pix", color=(-1, -1, -1))
+win = visual.Window(monitor="testMonitor", fullscr=True, units="pix", color=(0, 0, 0))
 tracker.calibrate(win)
 
 for pattern in ["*.cal", "*calibration_image*.png", "*validation_image*.png"]:
@@ -75,7 +75,7 @@ print(f"Đã lưu kết quả calibration vào: {calib_dir}/")
 # ================= 2. Màn hình đếm ngược =================
 instruction_text = visual.TextStim(
     win,
-    text="Task 1 sắp bắt đầu.\n\nKhi trang web hiện ra, hãy nhìn vào thanh điều hướng\n(nav bar) trên cùng trước tiên.",
+    text="Task 1 is about to start.\n\nPlease look around freely\n",
     color="white", height=36, wrapWidth=1000, pos=(0, 150),
 )
 countdown_text = visual.TextStim(win, text="", color="white", height=90, pos=(0, -100))
