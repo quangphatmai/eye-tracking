@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .vscode/
+
+# Dữ liệu participant - loại video ra khỏi git (quá nặng, không nén tốt)
+participant_*/*.mp4
+participant_*/*.MP4

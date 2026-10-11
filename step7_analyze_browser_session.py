@@ -8,7 +8,7 @@ sys.path.append("PyGazeAnalyser")
 from pygazeanalyser.detectors import fixation_detection
 
 # ================= CẤU HÌNH =================
-PARTICIPANT_DIR = "participant_06"   # đổi đúng folder participant mới nhất
+PARTICIPANT_DIR = "participant_07"   # đổi đúng folder participant mới nhất
 
 GAZE_CSV = f"{PARTICIPANT_DIR}/gaze_data.csv"
 FRAME_LOG = f"{PARTICIPANT_DIR}/frame_log.csv"
