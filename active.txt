@@ -9,3 +9,35 @@ git checkout main
 .\venv\share\ffpyplayer\ffmpeg\bin\ffmpeg.exe -i participant_02\session_recording_with_gaze.mp4 -c:v libx264 -pix_fmt yuv420p participant_02\session_recording_with_gaze_fixed.mp4
 
 
+# ===== SETUP VENV MỚI TRÊN LAPTOP (ngoài OneDrive) =====
+
+# 0. Kiểm tra các bản Python đã cài trên MÁY NÀY, tìm đúng đường dẫn bản 3.10
+#    (đường dẫn có thể KHÁC desktop — không copy nguyên path từ desktop)
+py -0p
+
+# 1. Tạo folder chứa venv (ngoài OneDrive)
+mkdir C:\pyenvs\eye-tracking-integration
+
+# 2. Tạo venv — THAY <đường-dẫn-python310-vừa-thấy-ở-bước-0> bằng path thật
+#    Ví dụ thường là: C:\Users\<tên>\AppData\Local\Programs\Python\Python310\python.exe
+<đường-dẫn-python310-vừa-thấy-ở-bước-0> -m venv C:\pyenvs\eye-tracking-integration\venv
+
+# 3. Activate venv mới
+C:\pyenvs\eye-tracking-integration\venv\Scripts\Activate.ps1
+
+# 4. Kiểm tra lại — PHẢI ra đúng 3.10.11, nếu không là venv bị tạo sai bản ở bước 2
+python --version
+
+# 5. Nâng cấp pip
+python -m pip install --upgrade pip
+
+# 6. Cài toàn bộ thư viện cần thiết (đã gộp đủ, kể cả 2 gói mới phát hiện thiếu)
+pip install tobii-research
+pip install "psychopy<2026.2.0"
+pip install titta
+pip install numpy matplotlib websockets
+pip install screeninfo mss pillow
+pip install selenium webdriver-manager
+
+# 7. Kiểm tra lại đã đủ hết chưa
+pip list | Select-String "tobii|psychopy|titta|numpy|matplotlib|websockets|screeninfo|mss|pillow|selenium|webdriver-manager"
