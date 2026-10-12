@@ -13,10 +13,13 @@ import json
 import time
 import threading
 import csv
+import subprocess   # <<< MỚI
+import sys          # <<< MỚI
 
 import numpy as np
 import cv2
 import mss
+import screeninfo   # <<< MỚI — để check số màn hình trước khi bật overlay
 
 import tobii_research as tr
 from titta import Titta
@@ -24,6 +27,8 @@ from psychopy import visual, core
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))   # <<< MỚI — để trỏ đúng đường dẫn 2 file step5/test_live_overlay dù chạy từ đâu
 
 user32 = ctypes.windll.user32
 SCREEN_W, SCREEN_H = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
@@ -33,7 +38,7 @@ TARGET_URL = "https://www.uvu.edu"
 SESSION_SECONDS = 60
 COUNTDOWN_SECONDS = 5
 TOBII_MODEL = "Tobii Pro Nano"
-RECORDING_FPS = 15   # fps ghi màn hình — 15 là mức an toàn, đủ mượt cho mục đích xem lại gaze
+RECORDING_FPS = 15
 
 def get_next_participant_id(base_dir="."):
     existing = [d for d in os.listdir(base_dir) if re.match(r"^participant_\d+$", d)]
@@ -91,6 +96,19 @@ for remaining in range(COUNTDOWN_SECONDS, 0, -1):
 
 win.close()
 
+# ================= 2.5 Bật live overlay cho observer — CHỈ sau khi PsychoPy đã đóng hẳn =================  # <<< MỚI — cả block này
+# Quan trọng: đặt NGAY SAU win.close() ở trên, TRƯỚC mục 3 bên dưới — lúc này PsychoPy không còn giữ GPU
+# display pipeline nữa, nên test_live_overlay.py (dùng mss) không bị tranh chấp GPU với calibration nữa.
+monitors = screeninfo.get_monitors()
+if len(monitors) > 1:
+    websocket_proc = subprocess.Popen([sys.executable, os.path.join(SCRIPT_DIR, "step5_websocket_server.py")])
+    overlay_proc = subprocess.Popen([sys.executable, os.path.join(SCRIPT_DIR, "test_live_overlay.py")])
+    time.sleep(2)  # cho 2 process kia kịp kết nối tracker + mở cửa sổ Tkinter trước khi vào task thật
+else:
+    websocket_proc = overlay_proc = None
+    print("Chỉ phát hiện 1 màn hình — bỏ qua live overlay (không cần cho máy 1 màn hình).")
+# <<< HẾT PHẦN MỚI 2.5
+
 # ================= 3. Gaze logging — vẫn đồng hồ Python như cũ =================
 found = tr.find_all_eyetrackers()
 eyetracker = found[0]
@@ -108,12 +126,12 @@ def gaze_data_callback(gaze_data):
 
 # ================= 4. Ghi màn hình song song (THAY cho scroll tracking) =================
 video_path = os.path.join(output_dir, "session_recording.mp4")
-frame_log = []   # elapsed_sec của từng frame đã ghi — dùng để khớp gaze chính xác
+frame_log = []
 stop_flag = threading.Event()
 
 def record_screen():
     with mss.mss() as sct:
-        monitor = sct.monitors[1]   # primary monitor — đổi số nếu Chrome mở ở màn hình phụ
+        monitor = sct.monitors[1]
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(video_path, fourcc, RECORDING_FPS,
                                   (monitor["width"], monitor["height"]))
@@ -147,6 +165,11 @@ time.sleep(SESSION_SECONDS)
 eyetracker.unsubscribe_from(tr.EYETRACKER_GAZE_DATA, gaze_data_callback)
 stop_flag.set()
 record_thread.join()
+
+if overlay_proc:        # <<< MỚI
+    overlay_proc.terminate()      # <<< MỚI
+if websocket_proc:      # <<< MỚI
+    websocket_proc.terminate()    # <<< MỚI
 
 print(f"Đã ghi được {len(gaze_log)} mẫu gaze trong {gaze_log[-1][0]:.2f}s (đồng hồ Python)")
 if frame_log:
