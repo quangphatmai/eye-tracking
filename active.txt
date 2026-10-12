@@ -1,5 +1,5 @@
-*Laptop
-.\venv\Scripts\Activate.ps1
+*Laptop + desktop activate:
+C:\pyenvs\eye-tracking-integration\venv\Scripts\Activate.ps1
 
 git checkout -b video-recording
 
@@ -9,5 +9,3 @@ git checkout main
 .\venv\share\ffpyplayer\ffmpeg\bin\ffmpeg.exe -i participant_02\session_recording_with_gaze.mp4 -c:v libx264 -pix_fmt yuv420p participant_02\session_recording_with_gaze_fixed.mp4
 
 
-*Desktop activate:
-D:\eye-tracking-desktop\Scripts\Activate.ps1
