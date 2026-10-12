@@ -8,6 +8,8 @@ import websockets
 import mss
 from PIL import Image, ImageTk
 from screeninfo import get_monitors
+import os
+print("PID của tiến trình này:", os.getpid())
 
 WS_URL = "ws://localhost:8765"
 SOURCE_W, SOURCE_H = 1920, 1080  # phải khớp đúng SCREEN_W/H trong step5_websocket_server.py
@@ -82,7 +84,7 @@ class LiveOverlay:
         self.canvas.itemconfigure(self.image_item, image=self.photo)
         if self.dot:
             self.canvas.tag_raise(self.dot)
-        self.root.after(50, self.update_mirror)  # ~20fps cho mirror, đủ dùng để test
+        self.root.after(150, self.update_mirror)  # ~20fps cho mirror, đủ dùng để test
 
     def poll_gaze(self):
         latest = None
