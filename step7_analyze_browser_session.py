@@ -8,7 +8,7 @@ sys.path.append("PyGazeAnalyser")
 from pygazeanalyser.detectors import fixation_detection
 
 # ================= CẤU HÌNH =================
-PARTICIPANT_DIR = "participant_12"   # đổi đúng folder participant mới nhất
+PARTICIPANT_DIR = "participant_13"   # đổi đúng folder participant mới nhất
 
 GAZE_CSV = f"{PARTICIPANT_DIR}/gaze_data.csv"
 FRAME_LOG = f"{PARTICIPANT_DIR}/frame_log.csv"
@@ -49,7 +49,7 @@ with open(GAZE_CSV) as f:
 t = np.array(t_list)
 lx, ly, lv = np.array(lx_list), np.array(ly_list), np.array(lv_list)
 rx, ry, rv = np.array(rx_list), np.array(ry_list), np.array(rv_list)
-print(f"Đọc được {len(t)} mẫu gaze, tổng {t[-1]:.1f}s.")
+print(f"Read {len(t)} gaze samples, total {t[-1]:.1f}s.")
 
 left_valid = lv == 1
 right_valid = rv == 1
@@ -69,7 +69,7 @@ t_valid, x_valid, y_valid = t[valid], x[valid], y[valid]
 time_valid_ms = t_valid * 1000.0
 
 Sfix, Efix = fixation_detection(x_valid, y_valid, time_valid_ms, maxdist=25, mindur=50)
-print(f"Phát hiện {len(Efix)} fixations.")
+print(f"Detected {len(Efix)} fixations.")
 
 fixation_windows = [(ev[0] / 1000.0, (ev[0] + ev[2]) / 1000.0) for ev in Efix]
 
@@ -85,7 +85,7 @@ with open(FRAME_LOG) as f:
     for row in csv.DictReader(f):
         frame_times.append(float(row["elapsed_sec"]))
 frame_times = np.array(frame_times)
-print(f"Đọc được {len(frame_times)} frame timestamps.")
+print(f"Read {len(frame_times)} frame timestamps.")
 
 # ---- Mở video gốc, chuẩn bị 2 video output ----
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -184,5 +184,5 @@ while True:
 cap.release()
 out_dot.release()
 out_heatmap.release()
-print(f"Xong. Video chấm+vệt: {VIDEO_OUT_DOT}")
-print(f"Xong. Video heatmap động: {VIDEO_OUT_HEATMAP}")
+print(f"Done. Dot + trail video: {VIDEO_OUT_DOT}")
+print(f"Done. dynamic heatmap video: {VIDEO_OUT_HEATMAP}")
