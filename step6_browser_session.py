@@ -13,13 +13,13 @@ import json
 import time
 import threading
 import csv
-import subprocess   # <<< MỚI
-import sys          # <<< MỚI
+import subprocess
+import sys
 
 import numpy as np
 import cv2
 import mss
-import screeninfo   # <<< MỚI — để check số màn hình trước khi bật overlay
+import screeninfo
 
 import tobii_research as tr
 from titta import Titta
@@ -28,7 +28,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))   # <<< MỚI — để trỏ đúng đường dẫn 2 file step5/test_live_overlay dù chạy từ đâu
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 user32 = ctypes.windll.user32
 SCREEN_W, SCREEN_H = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
@@ -96,18 +96,15 @@ for remaining in range(COUNTDOWN_SECONDS, 0, -1):
 
 win.close()
 
-# ================= 2.5 Bật live overlay cho observer — CHỈ sau khi PsychoPy đã đóng hẳn =================  # <<< MỚI — cả block này
-# Quan trọng: đặt NGAY SAU win.close() ở trên, TRƯỚC mục 3 bên dưới — lúc này PsychoPy không còn giữ GPU
-# display pipeline nữa, nên test_live_overlay.py (dùng mss) không bị tranh chấp GPU với calibration nữa.
+# ================= 2.5 Bật live overlay cho observer — CHỈ sau khi PsychoPy đã đóng hẳn =================
 monitors = screeninfo.get_monitors()
 if len(monitors) > 1:
     websocket_proc = subprocess.Popen([sys.executable, os.path.join(SCRIPT_DIR, "step5_websocket_server.py")])
     overlay_proc = subprocess.Popen([sys.executable, os.path.join(SCRIPT_DIR, "test_live_overlay.py")])
-    time.sleep(2)  # cho 2 process kia kịp kết nối tracker + mở cửa sổ Tkinter trước khi vào task thật
+    time.sleep(2)
 else:
     websocket_proc = overlay_proc = None
     print("Chỉ phát hiện 1 màn hình — bỏ qua live overlay (không cần cho máy 1 màn hình).")
-# <<< HẾT PHẦN MỚI 2.5
 
 # ================= 3. Gaze logging — vẫn đồng hồ Python như cũ =================
 found = tr.find_all_eyetrackers()
@@ -124,7 +121,7 @@ def gaze_data_callback(gaze_data):
     rvalid = gaze_data["right_gaze_point_validity"]
     gaze_log.append((t, lx, ly, lvalid, rx, ry, rvalid))
 
-# ================= 4. Ghi màn hình song song (THAY cho scroll tracking) =================
+# ================= 4. Ghi màn hình song song =================
 video_path = os.path.join(output_dir, "session_recording.mp4")
 frame_log = []
 stop_flag = threading.Event()
@@ -156,6 +153,39 @@ eyetracker.subscribe_to(tr.EYETRACKER_GAZE_DATA, gaze_data_callback, as_dictiona
 record_thread = threading.Thread(target=record_screen)
 record_thread.start()
 
+scroll_log = []  # (elapsed_sec, scroll_y) — vị trí cuộn trang theo thời gian
+
+def log_scroll():
+    while not stop_flag.is_set():
+        try:
+            scroll_y = driver.execute_script(
+                "return (window.pageYOffset || document.documentElement.scrollTop || 0) * (window.devicePixelRatio || 1);"
+)
+            scroll_log.append((time.time() - session_start, scroll_y))
+        except Exception:
+            pass
+        time.sleep(0.1)
+
+scroll_thread = threading.Thread(target=log_scroll)
+scroll_thread.start()
+
+nav_log = []  # (elapsed_sec, url) — ghi lại mỗi khi URL trang đổi (chuyển trang)
+
+def log_navigation():
+    last_url = None
+    while not stop_flag.is_set():
+        try:
+            current_url = driver.current_url
+            if current_url != last_url:
+                nav_log.append((time.time() - session_start, current_url))
+                last_url = current_url
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+nav_thread = threading.Thread(target=log_navigation)
+nav_thread.start()
+
 print("=== BẮT ĐẦU GHI — đang mở trang ===")
 driver.get(TARGET_URL)
 
@@ -165,11 +195,13 @@ time.sleep(SESSION_SECONDS)
 eyetracker.unsubscribe_from(tr.EYETRACKER_GAZE_DATA, gaze_data_callback)
 stop_flag.set()
 record_thread.join()
+scroll_thread.join()
+nav_thread.join()
 
-if overlay_proc:        # <<< MỚI
-    overlay_proc.terminate()      # <<< MỚI
-if websocket_proc:      # <<< MỚI
-    websocket_proc.terminate()    # <<< MỚI
+if overlay_proc:
+    overlay_proc.terminate()
+if websocket_proc:
+    websocket_proc.terminate()
 
 print(f"Đã ghi được {len(gaze_log)} mẫu gaze trong {gaze_log[-1][0]:.2f}s (đồng hồ Python)")
 if frame_log:
@@ -186,6 +218,16 @@ with open(os.path.join(output_dir, "frame_log.csv"), "w", newline="") as f:
     writer.writerow(["frame_index", "elapsed_sec"])
     writer.writerows(enumerate(frame_log))
 
+with open(os.path.join(output_dir, "scroll_log.csv"), "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["elapsed_sec", "scroll_y"])
+    writer.writerows(scroll_log)
+
+with open(os.path.join(output_dir, "nav_log.csv"), "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["elapsed_sec", "url"])
+    writer.writerows(nav_log)
+
 with open(os.path.join(output_dir, "screen_info.json"), "w") as f:
     json.dump({"SCREEN_W": SCREEN_W, "SCREEN_H": SCREEN_H}, f)
 
@@ -195,3 +237,5 @@ print(f"Xong. Dữ liệu lưu trong folder: {output_dir}/")
 print(f"  - gaze_data.csv ({len(gaze_log)} mẫu)")
 print(f"  - session_recording.mp4 ({len(frame_log)} frames)")
 print(f"  - frame_log.csv (timestamp từng frame)")
+print(f"  - scroll_log.csv ({len(scroll_log)} mốc cuộn trang)")
+print(f"  - nav_log.csv ({len(nav_log)} lần chuyển trang)")

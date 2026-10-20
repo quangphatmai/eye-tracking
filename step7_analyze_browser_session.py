@@ -8,26 +8,33 @@ sys.path.append("PyGazeAnalyser")
 from pygazeanalyser.detectors import fixation_detection
 
 # ================= CẤU HÌNH =================
-PARTICIPANT_DIR = "participant_13"   # đổi đúng folder participant mới nhất
+PARTICIPANT_DIR = "participant_16"   # đổi đúng folder participant mới nhất
 
 GAZE_CSV = f"{PARTICIPANT_DIR}/gaze_data.csv"
 FRAME_LOG = f"{PARTICIPANT_DIR}/frame_log.csv"
+SCROLL_LOG = f"{PARTICIPANT_DIR}/scroll_log.csv"
+NAV_LOG = f"{PARTICIPANT_DIR}/nav_log.csv"
 VIDEO_IN = f"{PARTICIPANT_DIR}/session_recording.mp4"
 VIDEO_OUT_DOT = f"{PARTICIPANT_DIR}/session_recording_with_gaze.mp4"
 VIDEO_OUT_HEATMAP = f"{PARTICIPANT_DIR}/session_recording_with_heatmap.mp4"
 SCREEN_INFO = f"{PARTICIPANT_DIR}/screen_info.json"
 
-TRAIL_SECONDS = 0.35
-TRAIL_STEPS = 8
 DOT_RADIUS = 14
 FIXATION_RADIUS = 26
 
-# ---- Tham số video heatmap động (MỚI) ----
-HEATMAP_DECAY = 0.92        # mỗi frame nhiệt cũ còn lại 92% — giảm (vd 0.85) để vệt tắt nhanh hơn, tăng (0.96) để tồn lâu hơn
+SCROLL_DPI_SCALE = 1.25   # đổi đúng theo % scaling Windows của bạn: 100%→1.0, 125%→1.25, 150%→1.5...
+
+# ---- Tham số video scanpath tích lũy ----
+SCANPATH_BASE_RADIUS = 10
+SCANPATH_RADIUS_PER_SEC = 30
+SCANPATH_COLOR = (255, 0, 255)
+SCANPATH_LABEL_COLOR = (255, 255, 255)
+
+# ---- Tham số video heatmap tích lũy ----
 HEATMAP_RADIUS = 45         # bán kính (px) đốm nhiệt thêm vào mỗi frame tại gaze hiện tại
 HEATMAP_BLUR_KSIZE = 65     # kernel Gaussian blur làm mềm đốm nhiệt — phải là số LẺ
 HEATMAP_GAIN = 1.0          # mỗi frame cộng thêm bao nhiêu nhiệt — tăng để heatmap "nóng" nhanh hơn
-HEATMAP_CAP = 4.0           # mức nhiệt coi là "max" khi tô màu — hạ xuống nếu muốn mau chuyển đỏ
+HEATMAP_CAP = 6.0           # mức nhiệt coi là "max" khi tô màu — vì giờ KHÔNG decay, để cao hơn bản cũ (4.0) cho đỡ bão hoà sớm
 HEATMAP_ALPHA_MAX = 0.75    # độ che màu heatmap tối đa lên frame gốc (0=trong suốt, 1=che hết)
 
 with open(SCREEN_INFO) as f:
@@ -71,14 +78,6 @@ time_valid_ms = t_valid * 1000.0
 Sfix, Efix = fixation_detection(x_valid, y_valid, time_valid_ms, maxdist=25, mindur=50)
 print(f"Detected {len(Efix)} fixations.")
 
-fixation_windows = [(ev[0] / 1000.0, (ev[0] + ev[2]) / 1000.0) for ev in Efix]
-
-def is_in_fixation(time_sec):
-    for start, end in fixation_windows:
-        if start <= time_sec <= end:
-            return True
-    return False
-
 # ---- Đọc frame_log.csv ----
 frame_times = []
 with open(FRAME_LOG) as f:
@@ -86,6 +85,42 @@ with open(FRAME_LOG) as f:
         frame_times.append(float(row["elapsed_sec"]))
 frame_times = np.array(frame_times)
 print(f"Read {len(frame_times)} frame timestamps.")
+
+# ---- Đọc scroll_log.csv ----
+scroll_t_list, scroll_y_list = [], []
+with open(SCROLL_LOG) as f:
+    for row in csv.DictReader(f):
+        scroll_t_list.append(float(row["elapsed_sec"]))
+        scroll_y_list.append(float(row["scroll_y"]))
+scroll_t = np.array(scroll_t_list)
+scroll_y_arr = np.array(scroll_y_list)
+scroll_y_arr = scroll_y_arr * SCROLL_DPI_SCALE   # <<< THÊM dòng này — quy đổi CSS px sang pixel vật lý
+print(f"Read {len(scroll_t)} scroll timestamps.")
+
+def get_scroll_at(time_sec):
+    if len(scroll_t) == 0:
+        return 0.0
+    return float(np.interp(time_sec, scroll_t, scroll_y_arr))
+
+# ---- Đọc nav_log.csv ----
+nav_t_list = []
+with open(NAV_LOG) as f:
+    for row in csv.DictReader(f):
+        nav_t_list.append(float(row["elapsed_sec"]))
+nav_times = np.array(nav_t_list)
+print(f"Read {len(nav_times)} navigation events.")
+
+def get_segment(time_sec):
+    if len(nav_times) == 0:
+        return 0
+    return max(0, int(np.searchsorted(nav_times, time_sec, side="right")) - 1)
+
+def segment_time_range(s):
+    start = nav_times[s] if len(nav_times) > 0 else 0.0
+    end = nav_times[s + 1] if (len(nav_times) > 0 and s + 1 < len(nav_times)) else float("inf")
+    return start, end
+
+num_segments = len(nav_times) if len(nav_times) > 0 else 1
 
 # ---- Mở video gốc, chuẩn bị 2 video output ----
 cap = cv2.VideoCapture(VIDEO_IN)
@@ -97,10 +132,31 @@ fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 out_dot = cv2.VideoWriter(VIDEO_OUT_DOT, fourcc, src_fps, (frame_w, frame_h))
 out_heatmap = cv2.VideoWriter(VIDEO_OUT_HEATMAP, fourcc, src_fps, (frame_w, frame_h))
 
-# Bản đồ nhiệt tích lũy — tồn tại xuyên suốt TOÀN BỘ video, không reset giữa frame
-heat_accum = np.zeros((frame_h, frame_w), dtype=np.float32)
+# ---- Canvas nhiệt riêng cho từng trang — đủ cao để chứa toàn bộ phạm vi đã cuộn của trang đó ----
+segment_scroll_min = []
+segment_scroll_max = []
+for s in range(num_segments):
+    start, end = segment_time_range(s)
+    mask = (scroll_t >= start) & (scroll_t < end)
+    if np.any(mask):
+        seg_vals = scroll_y_arr[mask]
+        segment_scroll_min.append(float(seg_vals.min()))
+        segment_scroll_max.append(float(seg_vals.max()))
+    else:
+        segment_scroll_min.append(0.0)
+        segment_scroll_max.append(0.0)
 
-# "Con dấu" nhiệt mềm — tạo 1 LẦN duy nhất ở đây, không tạo lại/blur lại mỗi frame
+heat_canvases = []
+for s in range(num_segments):
+    extra = segment_scroll_max[s] - segment_scroll_min[s]
+    canvas_h = int(frame_h + extra) + 2
+    heat_canvases.append(np.zeros((canvas_h, frame_w), dtype=np.float32))
+
+# Fixation đã "xong" tính tới thời điểm hiện tại — tích lũy, kèm scroll offset + segment lúc ghi
+drawn_fixations = []
+added_indices = set()
+
+# "Con dấu" nhiệt mềm — tạo 1 LẦN duy nhất
 stamp_size = HEATMAP_RADIUS * 2 + HEATMAP_BLUR_KSIZE
 stamp = np.zeros((stamp_size, stamp_size), dtype=np.float32)
 cv2.circle(stamp, (stamp_size // 2, stamp_size // 2), HEATMAP_RADIUS, 1.0, -1)
@@ -119,60 +175,71 @@ while True:
         gx = int(np.interp(frame_time, t_valid, x_valid))
         gy = int(np.interp(frame_time, t_valid, y_valid))
 
-    # ===== 1. Video chấm + vệt mờ — bản tối ưu, chỉ xử lý vùng nhỏ quanh chấm =====
+    current_segment = get_segment(frame_time)
+    scroll_now = get_scroll_at(frame_time)
+
+    # ===== 1. Video scanpath tích lũy (bù scroll + lọc theo trang) =====
+    current_time_ms = frame_time * 1000.0
+    for idx, ev in enumerate(Efix):
+        start_ms, dur_ms = ev[0], ev[2]
+        end_ms = start_ms + dur_ms
+        if end_ms <= current_time_ms and idx not in added_indices:
+            added_indices.add(idx)
+            scroll_at_record = get_scroll_at(start_ms / 1000.0)
+            fixation_segment = get_segment(start_ms / 1000.0)
+            drawn_fixations.append((ev, scroll_at_record, fixation_segment))
+
     frame_dot = frame.copy()
-    for step in range(TRAIL_STEPS, 0, -1):
-        sample_time = frame_time - (TRAIL_SECONDS * step / TRAIL_STEPS)
-        if sample_time < t_valid[0] or sample_time > t_valid[-1]:
+    order = 0
+    prev_center = None
+    for ev, scroll_at_record, fixation_segment in drawn_fixations:
+        if fixation_segment != current_segment:
             continue
-        sx = int(np.interp(sample_time, t_valid, x_valid))
-        sy = int(np.interp(sample_time, t_valid, y_valid))
-        alpha = 1.0 - (step / TRAIL_STEPS)
-        radius = max(3, int(DOT_RADIUS * (0.4 + 0.6 * alpha)))
-
-        x0, x1 = max(0, sx - radius - 2), min(frame_w, sx + radius + 2)
-        y0, y1 = max(0, sy - radius - 2), min(frame_h, sy + radius + 2)
-        if x1 <= x0 or y1 <= y0:
+        order += 1
+        dur_ms, fx, fy = ev[2], ev[3], ev[4]
+        adjusted_y = fy + (scroll_at_record - scroll_now)
+        if adjusted_y < -50 or adjusted_y > frame_h + 50:
+            prev_center = None
             continue
-        roi = frame_dot[y0:y1, x0:x1]
-        overlay_roi = roi.copy()
-        cv2.circle(overlay_roi, (sx - x0, sy - y0), radius, (0, 255, 0), -1)
-        frame_dot[y0:y1, x0:x1] = cv2.addWeighted(overlay_roi, alpha * 0.5, roi, 1 - alpha * 0.5, 0)
-
-    if has_gaze_now:
-        radius = FIXATION_RADIUS if is_in_fixation(frame_time) else DOT_RADIUS
-        color = (0, 140, 255) if is_in_fixation(frame_time) else (0, 255, 0)
-        cv2.circle(frame_dot, (gx, gy), radius, color, -1)
-        cv2.circle(frame_dot, (gx, gy), radius, (255, 255, 255), 2)
+        center = (int(fx), int(adjusted_y))
+        radius = int(SCANPATH_BASE_RADIUS + (dur_ms / 1000.0) * SCANPATH_RADIUS_PER_SEC)
+        if prev_center is not None:
+            cv2.line(frame_dot, prev_center, center, SCANPATH_COLOR, 2)
+        cv2.circle(frame_dot, center, radius, SCANPATH_COLOR, -1)
+        cv2.circle(frame_dot, center, radius, (255, 255, 255), 1)
+        cv2.putText(frame_dot, str(order), (center[0] - 8, center[1] + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, SCANPATH_LABEL_COLOR, 1, cv2.LINE_AA)
+        prev_center = center
 
     out_dot.write(frame_dot)
 
-    # ===== 2. Video heatmap động — MỚI =====
-    # (a) Làm mờ dần toàn bộ bản đồ nhiệt — vùng cũ tự nhạt đi nếu mắt rời khỏi đó
-    heat_accum *= HEATMAP_DECAY
+    # ===== 2. Video heatmap tích lũy (bù scroll + lọc theo trang) =====
+    canvas = heat_canvases[current_segment]
+    min_scroll_seg = segment_scroll_min[current_segment]
+    canvas_h = canvas.shape[0]
 
-    # (b) Cộng thêm nhiệt mới tại gaze hiện tại — dùng lại "con dấu" đã tạo sẵn, không blur lại
-    if has_gaze_now and 0 <= gx < frame_w and 0 <= gy < frame_h:
-        y0 = gy - stamp_half
-        y1 = y0 + stamp_size      # luôn đúng = stamp_size, không dùng gy + stamp_half nữa
+    if has_gaze_now and 0 <= gx < frame_w:
+        page_y = gy + scroll_now                      # vị trí "tuyệt đối trên trang"
+        center_row = int(page_y - min_scroll_seg)      # vị trí tương ứng trên canvas
+        y0 = center_row - stamp_half
+        y1 = y0 + stamp_size
         x0 = gx - stamp_half
         x1 = x0 + stamp_size
-        sy0, sy1 = max(0, y0), min(frame_h, y1)
+        sy0, sy1 = max(0, y0), min(canvas_h, y1)
         sx0, sx1 = max(0, x0), min(frame_w, x1)
         if sy1 > sy0 and sx1 > sx0:
-            heat_accum[sy0:sy1, sx0:sx1] += (
+            canvas[sy0:sy1, sx0:sx1] += (
                 stamp[sy0 - y0 : stamp_size - (y1 - sy1), sx0 - x0 : stamp_size - (x1 - sx1)]
                 * HEATMAP_GAIN
             )
 
-    # (c) Chuẩn hoá về 0..1 theo mức cap cố định (để màu không chớp giữa các frame)
-    heat_norm = np.clip(heat_accum / HEATMAP_CAP, 0.0, 1.0)
+    viewport_top = int(scroll_now - min_scroll_seg)
+    viewport_top = max(0, min(viewport_top, canvas_h - frame_h))
+    heat_view = canvas[viewport_top: viewport_top + frame_h, :]
 
-    # (d) Áp colormap JET (xanh = mới/nhạt, đỏ = đang nhìn lâu/nóng)
+    heat_norm = np.clip(heat_view / HEATMAP_CAP, 0.0, 1.0)
     heat_color = cv2.applyColorMap((heat_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
 
-    # (e) Alpha-blend theo từng pixel — chỗ không có nhiệt giữ nguyên frame gốc,
-    #     chỉ "cháy" màu ở đúng chỗ có gaze, không làm tối cả video
     alpha_map = (heat_norm * HEATMAP_ALPHA_MAX)[:, :, None]
     frame_heat = (frame.astype(np.float32) * (1 - alpha_map)
                   + heat_color.astype(np.float32) * alpha_map).astype(np.uint8)
@@ -184,5 +251,5 @@ while True:
 cap.release()
 out_dot.release()
 out_heatmap.release()
-print(f"Done. Dot + trail video: {VIDEO_OUT_DOT}")
-print(f"Done. dynamic heatmap video: {VIDEO_OUT_HEATMAP}")
+print(f"Done. Scanpath video: {VIDEO_OUT_DOT}")
+print(f"Done. Accumulated heatmap video: {VIDEO_OUT_HEATMAP}")
