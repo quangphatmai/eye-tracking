@@ -1,26 +1,24 @@
-// What the participant sees on top of the website they test: the message screens and the X button.
+// What the participant sees on top of the website they test: the message screens (intro, task, Start Task).
 //
 // hardware_tobii.py gives this file to Chrome ("run it on every new page"), so it is there on every page,
 // also after the participant clicked a link and went to another page of the site.
 //
-// It makes a message screen (dark background, text, one green button) and a round X button in the top right corner.
+// It makes a message screen (dark background, text, one green button).
 // Python controls it with:   window.__et.showMessage(text, buttonLabel)   window.__et.hideMessage()
-//                            window.__et.showX(true or false)
 // and asks what the participant did with:   window.__et.takeClick()  (pressed the green button?)
-//                                           window.__et.takeX()      (pressed X?)
-// Each "take" answers true once, then false again until the next press.
+// It answers true once, then false again until the next press.
+// There is no X button here any more: during a task the participant closes the Chrome window itself.
 //
 // Everything is drawn inside a shadow root, so the CSS of the tested website cannot change how it looks.
 
 (() => {
   if (window.top !== window || window.__et) return; // only the main page, not frames inside it; only once
 
-  const state = { clicked: false, xClicked: false };
+  const state = { clicked: false };
   let host = null;
   let messageBox = null;
   let messageText = null;
   let messageButton = null;
-  let xButton = null;
 
   const CSS = `
     * { box-sizing: border-box; }
@@ -37,12 +35,6 @@
       font: 600 16px Lato, "Segoe UI", Arial, sans-serif;
     }
     .button:hover { background: #1a4127; }
-    .x {
-      position: fixed; top: 24px; right: 24px; display: none; align-items: center; justify-content: center;
-      width: 48px; height: 48px; padding: 0; background: #fff; border: 0; border-radius: 50%; cursor: pointer;
-      box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
-    }
-    .x:hover { background: #e8e8e8; }
   `;
 
   // Build everything once; put it into the page. Returns false while the page has no <html> yet.
@@ -73,20 +65,7 @@
       });
       messageBox.append(messageText, messageButton);
 
-      xButton = document.createElement("button");
-      xButton.type = "button";
-      xButton.className = "x";
-      xButton.setAttribute("aria-label", "I have finished this task");
-      xButton.style.pointerEvents = "auto";
-      xButton.innerHTML =
-        '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">' +
-        '<path d="M5 5L19 19M19 5L5 19" stroke="#000" stroke-width="3" stroke-linecap="round" /></svg>';
-      xButton.addEventListener("click", () => {
-        state.xClicked = true;
-        xButton.style.display = "none";
-      });
-
-      shadow.append(style, messageBox, xButton);
+      shadow.append(style, messageBox);
     }
     parent.appendChild(host);
     return true;
@@ -104,20 +83,9 @@
     hideMessage() {
       if (messageBox) messageBox.style.display = "none";
     },
-    showX(visible) {
-      if (!mount()) return false;
-      state.xClicked = false;
-      xButton.style.display = visible ? "flex" : "none";
-      return true;
-    },
     takeClick() {
       const answer = state.clicked;
       state.clicked = false;
-      return answer;
-    },
-    takeX() {
-      const answer = state.xClicked;
-      state.xClicked = false;
       return answer;
     },
   };
@@ -139,16 +107,6 @@
     }
     return openHere.call(window, url, ...rest);
   };
-
-  // During a task Python sets window.__etWantX = true before this file runs: every new page then shows X by itself.
-  if (window.__etWantX) {
-    const showWhenReady = () => window.__et.showX(true);
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", showWhenReady);
-    } else {
-      showWhenReady();
-    }
-  }
 
   // Some sites rebuild the whole page: put our layer back if it was removed
   setInterval(() => {

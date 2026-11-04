@@ -6,10 +6,14 @@ This is step6_browser_session.py cut into the pieces the website asks for:
   calibrate     step6 "1. Calibration"                              (the observer can repeat it)
   familiarize   NEW: the participant explores the website, then reads the intro and presses Next (no tracking, no recording)
   run_task      step6 "3. gaze" + "4. recording" + "5. start" + "6. stop + save"   (once per task)
-                NEW: the participant reads the task and presses Start Task; during the task there is an X button
-  close         driver.quit()
+                NEW: the participant reads the task and presses Start Task. During the task Chrome is a normal window
+                (tabs, address bar, minimize / maximize / close). Closing that window = "I have finished this task".
+  close         closes Chrome
 
-What the participant sees on top of the website (the intro, the task, the X button) is drawn by participant_overlay.js,
+Every task gets its own Chrome window: it is closed when the task ends (the participant closed it, the time ran out or the
+observer pressed next) and the next task opens a new one (2-3 seconds). Nothing is recorded while it opens.
+
+What the participant sees on top of the website (the intro and the task screens) is drawn by participant_overlay.js,
 which Chrome runs on every page. The PsychoPy countdown of step6 is gone: the participant starts the task themselves.
 
 The recording code inside is the same as step6 on purpose (it is the part that is known to work on this setup).
@@ -51,7 +55,10 @@ TOBII_MODEL = "Tobii Pro Nano"
 RECORDING_FPS = 15
 
 OVERLAY_JS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "participant_overlay.js")
-INTRO_TEXT = "You are going to be given a series of tasks. When you think you have completed the task click the \u201cX\u201d."
+INTRO_TEXT = (
+    "You are going to be given a series of tasks. "
+    "When you think you have completed the task, click the \u201cX\u201d in the top right corner of the screen."
+)
 
 
 def scale_factor():
@@ -74,21 +81,15 @@ class TobiiHardware:
         self.screen_w, self.screen_h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
         print(f"Screen (real pixels): {self.screen_w}x{self.screen_h}")
 
-        # step6 "0. Chrome first": a kiosk Chrome on the participant's screen, waiting on a blank page
-        options = webdriver.ChromeOptions()
-        options.add_argument("--kiosk")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("useAutomationExtension", False)
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        self.driver.get("about:blank")
-
-        # From now on every page Chrome opens gets the overlay (intro / task screens / X button)
+        # Chrome is opened later, once per task (_open_browser). Only the driver file is fetched now.
+        self.driver_path = ChromeDriverManager().install()
+        self.driver = None
+        self.page_url = None  # the page the participant is on (to open it again if they close the window by mistake)
+        self.pending_message = None  # (text, button) of the message on the screen right now, or None
+        self.known_handles = 0
         with open(OVERLAY_JS, encoding="utf-8") as file:
             self.overlay_source = file.read()
-        self.overlay_script_id = None
         self.quit_event = threading.Event()  # worker.py replaces it: set when the session is closing
-        self._load_overlay(want_x=False)
 
         # step6 "1. Calibration": connect to the tracker (the calibration itself happens in calibrate())
         settings = Titta.get_defaults(TOBII_MODEL)
@@ -122,30 +123,68 @@ class TobiiHardware:
 
     # ---------- What the participant sees on top of the website ----------
 
-    def _load_overlay(self, want_x):
-        """Chrome runs the overlay on every NEW page. want_x: the X button shows by itself on every new page (during a task)."""
-        if self.overlay_script_id:
-            self.driver.execute_cdp_cmd("Page.removeScriptToEvaluateOnNewDocument", {"identifier": self.overlay_script_id})
-        source = f"window.__etWantX = {'true' if want_x else 'false'};\n" + self.overlay_source
-        result = self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": source})
-        self.overlay_script_id = result["identifier"]
+    def _open_browser(self, url):
+        """A new, normal Chrome window (maximized, clean profile) on the participant's screen, showing url."""
+        self._quit_browser()
+        options = webdriver.ChromeOptions()
+        options.add_argument("--start-maximized")
+        options.add_argument("--window-position=0,0")  # CHECK: the main screen = the participant's screen
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        options.add_argument("--disable-search-engine-choice-screen")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--password-store=basic")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])  # no "controlled by automated software" bar
+        options.add_experimental_option("useAutomationExtension", False)
+        options.add_experimental_option("prefs", {"credentials_enable_service": False, "profile.password_manager_enabled": False})
+        self.driver = webdriver.Chrome(service=Service(self.driver_path), options=options)  # a new empty profile each time
+        try:
+            self.driver.maximize_window()
+        except Exception:
+            pass
+        # Every page Chrome opens from now on gets the overlay (the intro and task screens)
+        self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": self.overlay_source})
+        self.page_url = url
+        self.driver.get(url)
+        self.known_handles = len(self.driver.window_handles)
 
-    def _follow_new_tab(self):
-        """A link that opens a NEW tab: Chrome would not run the overlay there (it was added for the old tab only).
-        So go to the new tab, give it the overlay and the X button too."""
+    def _quit_browser(self):
+        driver, self.driver = self.driver, None
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    def _window_closed(self):
+        """True when the participant closed the Chrome window. It must fail 3 times in a row (one slow answer is not a close)."""
+        if self.driver is None:
+            return True
+        for _ in range(3):
+            try:
+                if self.driver.window_handles:
+                    return False
+            except Exception:
+                pass
+            time.sleep(0.05)
+        return True
+
+    def _follow_tabs(self):
+        """The participant may open another tab (Ctrl+click) or close one: stay on a tab that exists, so scroll and address are still logged."""
         try:
             handles = self.driver.window_handles
-            if len(handles) <= self.known_handles:
+            if not handles:
                 return
+            newer = len(handles) > self.known_handles
             self.known_handles = len(handles)
-            self.driver.switch_to.window(handles[-1])
-            source = f"window.__etWantX = true;\n" + self.overlay_source
-            result = self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": source})
-            self.overlay_script_id = result["identifier"]
-            self.driver.execute_script(source)  # the page that is already open in that tab
-            self.driver.execute_script("window.__et && window.__et.showX(true)")
+            try:
+                current = self.driver.current_window_handle
+            except Exception:
+                current = None  # the tab we were on is gone
+            if newer or current not in handles:
+                self.driver.switch_to.window(handles[-1])
         except Exception:
-            pass  # the tab may be closing: try again at the next round
+            pass  # try again at the next round
 
     def _js(self, script):
         """Run javascript in the page. A page that is still loading can refuse: then the answer is None."""
@@ -155,26 +194,43 @@ class TobiiHardware:
             return None
 
     def _show_message(self, text, button_label):
+        self.pending_message = (text, button_label)
         for _ in range(50):  # the page may need a moment before the overlay can be drawn
             if self._js(f"return window.__et && window.__et.showMessage({json.dumps(text)}, {json.dumps(button_label)})"):
                 return
             time.sleep(0.1)
         raise RuntimeError("The participant's screen did not show the message (is the page blocking scripts?)")
 
+    def _hide_message(self):
+        self.pending_message = None
+        self._js("window.__et && window.__et.hideMessage()")
+
     def _wait_for_click(self, stop_event):
-        """Waits until the participant presses the button of the message. False if the observer skipped it instead."""
+        """Waits until the participant presses the button of the message. False if the observer skipped it instead.
+        If the participant closes the window meanwhile, a new window opens with the same message."""
         while True:
             if self._js("return window.__et && window.__et.takeClick()"):
                 return True
             if stop_event.wait(0.1) or self.quit_event.is_set():
                 return False
+            if self._window_closed():
+                self._open_browser(self.page_url)
+                if self.pending_message:
+                    self._show_message(*self.pending_message)
 
     # ---------- Familiarization ----------
 
     def familiarize(self, url, duration, stop_event, emit):
-        self.driver.get(url)
+        self._open_browser(url)
         emit("familiarization_started", duration=duration)
-        stop_event.wait(timeout=duration)  # nothing is tracked or recorded here. "stop" = the observer skips the waiting
+        # Nothing is tracked or recorded here. "stop" = the observer skips the waiting. Closing the window ends it early too.
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            if stop_event.wait(0.1) or self.quit_event.is_set():
+                break
+            if self._window_closed():
+                self._open_browser(url)  # the intro needs a window
+                break
         if self.quit_event.is_set():
             return
         stop_event.clear()  # that skip is used up: the intro still waits for the participant
@@ -182,7 +238,8 @@ class TobiiHardware:
         self._show_message(INTRO_TEXT, "Next")
         emit("intro_shown")
         self._wait_for_click(stop_event)  # the observer can also skip this
-        self._js("window.__et.hideMessage()")
+        self._hide_message()
+        # The window stays open: the first task uses it (the next tasks each open a new one)
 
     # ---------- One task ----------
 
@@ -191,14 +248,21 @@ class TobiiHardware:
 
         eyetracker = tr.find_all_eyetrackers()[0]  # step6 "3. Gaze logging" (done before the participant presses Start)
 
-        # The task on a fresh page, the participant presses Start Task when ready (nothing is recorded yet)
-        self.driver.get(url)
+        # The task in a Chrome window: after the familiarization its window is still open, otherwise a new one opens (2-3 s).
+        # The participant presses Start Task when ready (nothing is recorded yet).
+        if self.driver is not None and not self._window_closed():
+            self._follow_tabs()
+            self.page_url = url
+            self.driver.get(url)
+        else:
+            self._open_browser(url)
         self._show_message(text or f"Task {index + 1}", "Start Task")
         emit("task_ready", index=index)
         if not self._wait_for_click(stop_event):  # the observer skipped before the participant started
-            self._js("window.__et.hideMessage()")
+            self._hide_message()
+            self._quit_browser()
             return "next"
-        self._js("window.__et.hideMessage()")
+        self._hide_message()
 
         gaze_log, frame_log, scroll_log, nav_log = [], [], [], []
         stop_flag = threading.Event()  # ends the three logging threads
@@ -261,24 +325,21 @@ class TobiiHardware:
 
         # step6 "5. Start recording"
         reason = "timeout"
-        self._load_overlay(want_x=True)  # every page the participant opens during the task gets the X button
         eyetracker.subscribe_to(tr.EYETRACKER_GAZE_DATA, gaze_data_callback, as_dictionary=True)
         try:
             for thread in threads:
                 thread.start()
-            self._js("return window.__et.showX(true)")  # on the page that is open now
             emit("task_started", index=index, duration=duration)  # the website's timer starts now
 
-            # step6 waited with time.sleep(SESSION_SECONDS). Here the wait also ends when the participant presses X
-            # ("done") or the observer presses "next task" ("next").
+            # step6 waited with time.sleep(SESSION_SECONDS). Here the wait also ends when the participant closes the
+            # Chrome window ("done"). Running out of time = "timeout". "next" only happens when the session is closing.
             deadline = time.time() + duration
-            self.known_handles = len(self.driver.window_handles)
             while time.time() < deadline:
-                self._follow_new_tab()
-                if stop_event.wait(0.1):
+                self._follow_tabs()
+                if stop_event.wait(0.1) or self.quit_event.is_set():
                     reason = "next"
                     break
-                if self._js("return window.__et && window.__et.takeX()"):
+                if self._window_closed():
                     reason = "done"
                     break
         finally:
@@ -288,11 +349,9 @@ class TobiiHardware:
             for thread in threads:
                 if thread.is_alive():
                     thread.join()
-            self._load_overlay(want_x=False)
-            self._js("window.__et && window.__et.showX(false)")
 
         self._save(out_dir, gaze_log, frame_log, scroll_log, nav_log)
-        self.driver.get("about:blank")  # the participant must not keep looking at the old page between tasks
+        self._quit_browser()  # the window is closed after the recording stopped (timeout / next) or already gone (done)
         return reason
 
     def _save(self, out_dir, gaze_log, frame_log, scroll_log, nav_log):
@@ -323,7 +382,4 @@ class TobiiHardware:
             json.dump({"SCREEN_W": self.screen_w, "SCREEN_H": self.screen_h, "SCALE_PERCENT": scale_factor()}, f)
 
     def close(self):
-        try:
-            self.driver.quit()
-        except Exception:
-            pass
+        self._quit_browser()

@@ -17,7 +17,7 @@ them must not kill the bridge. The bridge and the worker talk through two text l
                                        {"event": "familiarization_done"}
                                        {"event": "task_ready", "index": 0}        the participant sees the task, waits for Start Task
                                        {"event": "task_started", "index": 0, "duration": 60}   the recording really began
-                                       {"event": "task_finished", "reason": "timeout" | "next" | "done"}   done = the participant pressed X
+                                       {"event": "task_finished", "reason": "timeout" | "next" | "done"}   done = the participant closed the Chrome window
                                        {"event": "error", "message": "..."}   something failed, the worker keeps running
                                        {"event": "fatal", "message": "..."}   the hardware could not start, the worker exits
 
