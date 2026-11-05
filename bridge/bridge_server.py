@@ -63,7 +63,7 @@ import re
 import uuid
 from urllib.parse import urlparse
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 HOST = "127.0.0.1"  # this computer only. Never "0.0.0.0": that would let other computers on the network in
 PORT = 8766  # 8765 is already used by step5_websocket_server.py
 

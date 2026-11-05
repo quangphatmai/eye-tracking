@@ -96,7 +96,16 @@ def main():
 
     try:
         while True:
-            command = commands.get()
+            try:
+                command = commands.get(timeout=0.03)
+            except queue.Empty:  # no command: the hardware may keep a window of its own alive (the head view)
+                idle = getattr(hardware, "idle", None)
+                if idle:
+                    try:
+                        idle()
+                    except Exception:
+                        traceback.print_exc()
+                continue
             kind = command.get("cmd")
             if kind == "quit":
                 break

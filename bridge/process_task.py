@@ -124,6 +124,8 @@ def read_csv(path, columns):
     rows = {name: [] for name in columns}
     with open(path) as file:
         for row in csv.DictReader(file):
+            if any(row.get(name) in (None, "") for name in columns):
+                continue  # an unfinished row (the window closed while it was written): leave it out
             for name, kind in columns.items():
                 rows[name].append(kind(row[name]))
     return {name: np.array(values) for name, values in rows.items()}
@@ -170,12 +172,20 @@ def process_task(task_dir, on_progress=lambda percent: None):
     scroll_t = scroll["elapsed_sec"]
     scroll_y_arr = scroll["scroll_y"] * scroll_dpi_scale  # CSS pixels -> screen pixels
 
+    nav_times = read_csv(path("nav_log.csv"), {"elapsed_sec": float})["elapsed_sec"]
+
     def get_scroll_at(time_sec):
+        # only the samples of the same page count: never glide from the old page's scroll to the new page's
         if len(scroll_t) == 0:
             return 0.0
+        if len(nav_times) > 0:
+            s = max(0, int(np.searchsorted(nav_times, time_sec, side="right")) - 1)
+            lo = int(np.searchsorted(scroll_t, nav_times[s], side="left"))
+            hi = int(np.searchsorted(scroll_t, nav_times[s + 1], side="left")) if s + 1 < len(nav_times) else len(scroll_t)
+            if hi <= lo:
+                return 0.0
+            return float(np.interp(time_sec, scroll_t[lo:hi], scroll_y_arr[lo:hi]))
         return float(np.interp(time_sec, scroll_t, scroll_y_arr))
-
-    nav_times = read_csv(path("nav_log.csv"), {"elapsed_sec": float})["elapsed_sec"]
 
     def get_segment(time_sec):
         if len(nav_times) == 0:

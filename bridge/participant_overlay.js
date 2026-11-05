@@ -15,6 +15,10 @@
   if (window.top !== window || window.__et) return; // only the main page, not frames inside it; only once
 
   const state = { clicked: false };
+  // For the heatmap: Python asks every 0.1 s "is the page being left?", so the heat of this page can stop at the exact moment of the click
+  const pageId = Math.random().toString(36).slice(2);
+  let leaving = false;
+  let leavingTimer = 0;
   let host = null;
   let messageBox = null;
   let messageText = null;
@@ -83,6 +87,10 @@
     hideMessage() {
       if (messageBox) messageBox.style.display = "none";
     },
+    pageId,
+    isLeaving() {
+      return leaving;
+    },
     takeClick() {
       const answer = state.clicked;
       state.clicked = false;
@@ -107,6 +115,16 @@
     }
     return openHere.call(window, url, ...rest);
   };
+
+  // The page is about to be replaced (link, form, typed address, reload): remember it for a moment.
+  // The old page stays alive until the new one answers, so Python can still read this flag during the wait.
+  window.addEventListener("beforeunload", () => {
+    leaving = true;
+    clearTimeout(leavingTimer);
+    leavingTimer = setTimeout(() => {
+      leaving = false; // the navigation did not happen (a download, a cancelled leave)
+    }, 3000);
+  });
 
   // Some sites rebuild the whole page: put our layer back if it was removed
   setInterval(() => {
