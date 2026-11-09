@@ -9,7 +9,10 @@ import os
 import sys
 
 WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "worker.py")
-PROCESS_TASK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "process_task.py")
+# the FAST version (720p, ready seconds after the task). The full-size one is process_task.py: set ET_FULL_VIDEOS=1 to use it
+PROCESS_TASK = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "process_task.py" if os.environ.get("ET_FULL_VIDEOS") else "process_task_fast.py"
+)
 START_TIMEOUT = 120  # seconds: Chrome and the eye tracker can take a while to start
 QUIT_TIMEOUT = 20  # seconds the worker gets to save its files and close Chrome before it is killed
 
@@ -34,6 +37,7 @@ class WorkerBackend:
         self.events = None  # lines from the worker, as dicts
         self.reader = None
         self.session_dir = None
+        self.locks = {}  # task folder -> lock: the same task is never processed twice at the same time
 
     # -- talking to the worker --
 
@@ -184,7 +188,39 @@ class WorkerBackend:
             raise WorkerError("No recorded task was found for this participant")
         return videos
 
+    @staticmethod
+    def _videos_done(task_dir):
+        recording = os.path.join(task_dir, "session_recording.mp4")
+        heatmap, scanpath = os.path.join(task_dir, "heatmap.mp4"), os.path.join(task_dir, "scanpath.mp4")
+        return (
+            os.path.exists(recording)
+            and os.path.exists(heatmap)
+            and os.path.exists(scanpath)
+            and min(os.path.getmtime(heatmap), os.path.getmtime(scanpath)) >= os.path.getmtime(recording)
+        )
+
+    async def process_task_now(self, session, index, on_percent):
+        """Right after a task: make its two videos (fast version) so the observer can watch them at once.
+        Returns {heatmap, scanpath} (urls), or None when there is nothing to process (skipped task, pretend tracker)."""
+        if self.hardware == "fake":
+            return None
+        base = f"study_{session['studyId']}/participant_{session['participantId']}_{session['id']}/task_{index + 1}"
+        task_dir = os.path.join(self.data_dir, *base.split("/"))
+        if not os.path.exists(os.path.join(task_dir, "session_recording.mp4")):
+            return None
+        await self._process_task(task_dir, on_percent)
+        url = f"http://127.0.0.1:{self.files_port}/{base}"
+        return {"heatmap": f"{url}/heatmap.mp4", "scanpath": f"{url}/scanpath.mp4"}
+
     async def _process_task(self, task_dir, on_percent):
+        lock = self.locks.setdefault(task_dir, asyncio.Lock())
+        async with lock:
+            if self._videos_done(task_dir):  # another job made them while this one was waiting
+                await on_percent(100)
+                return
+            await self._run_process(task_dir, on_percent)
+
+    async def _run_process(self, task_dir, on_percent):
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "-u", PROCESS_TASK, task_dir,
             stdout=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL,

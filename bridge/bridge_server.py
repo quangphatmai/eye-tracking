@@ -33,6 +33,8 @@ Website -> bridge
   process_participants { studyId, participants: [{ participantId, sessionId, tasks }] }
                                                          later, when nobody is being recorded: make the heatmap and
                                                          scanpath videos, one participant after the other
+  capture_thumbnail { studyId, url }                     any time except during a session: a screenshot of the page (the picture
+                                                         of the study card on the home page), taken by Chrome in the background
 
 Bridge -> website
   ready               { version, mode, tracker }         sent once, right after the website connects
@@ -45,12 +47,18 @@ Bridge -> website
   task_ready          { index }                          the participant sees the task and the "Start Task" button
   task_started        { index, duration }                the participant pressed "Start Task": the recording really began
   task_finished       { index, reason }                  reason: "timeout" | "next" (observer) | "done" (the participant pressed X)
+  task_processing     { index, percent }                 the heatmap and scanpath videos of this task are being made (starts right after
+                                                         task_finished, about 20-40 s for a 3 minute task)
+  task_processed      { index, heatmap, scanpath }       they are ready (urls); both null when there is nothing to process
+  task_process_failed { index, message }                 it did not work; the Results page makes the videos again when it opens
   session_ended       { sessionId, studyId, participantId, tasks }   the recordings are saved. tasks = how many were recorded
   participant_started { participantId }                  the videos of this participant are being made
   participant_progress{ participantId, done, total, percent }   done of total tasks are finished, percent = the current task
   participant_done    { participantId, videos }          videos: [{ task, heatmap, scanpath }] (url or null)
   participant_failed  { participantId, message }         this participant failed, the next one still gets its turn
   processing_done     {}                                 all participants were tried
+  thumbnail_ready     { studyId, url, image }            image = "data:image/jpeg;base64,..." (640x400, the top of the page)
+  thumbnail_failed    { studyId, url, reason, message }  reason "busy" (a session is running) or "failed"
   error               { code, message }                  something was refused, the connection stays open
 ------------------------------------------------------------------------------------------------
 """
@@ -138,6 +146,9 @@ class MockBackend:
         except asyncio.TimeoutError:
             return "timeout"
 
+    async def process_task_now(self, session, index, on_percent):
+        return None  # no real recordings in mock mode: nothing to process
+
     async def process_participant(self, study_id, participant_id, session_id, task_count, on_progress):
         videos = []
         for index in range(task_count):
@@ -161,6 +172,8 @@ class Connection:
         self.session = None  # {"id", "studyId", "participantId", "calibrated", "finished": [task indexes]}
         self.job = None  # the calibration / task / processing that is running right now
         self.stop = None  # asyncio.Event: set by finish_task to end the running task early
+        self.video_jobs = set()  # the videos of finished tasks being made in the background (one after the other)
+        self.video_lock = asyncio.Lock()
 
     async def emit(self, type, **data):
         await self._emit({"type": type, **data})
@@ -183,6 +196,8 @@ class Connection:
                 await self.job
             except asyncio.CancelledError:
                 pass
+        for video_job in list(self.video_jobs):
+            video_job.cancel()
         if self.session:
             await self.backend.close_session()
             self.session = None
@@ -204,10 +219,31 @@ class Connection:
             "finish_task": self.on_finish_task,
             "end_session": self.on_end_session,
             "process_participants": self.on_process_participants,
+            "capture_thumbnail": self.on_capture_thumbnail,
         }.get(kind)
         if handler is None:
             return await self.error("unknown_type", f"Unknown message type: {kind}")
         await handler(message)
+
+    async def on_capture_thumbnail(self, message):
+        # the picture of a study card: allowed any time except during a session (a second Chrome would slow the recording)
+        study_id, url = message.get("studyId"), message.get("url")
+        if self.session:
+            return await self.emit("thumbnail_failed", studyId=study_id, url=url, reason="busy", message="A session is running")
+        job = asyncio.create_task(self._capture_thumbnail(study_id, url))
+        self.video_jobs.add(job)
+        job.add_done_callback(self.video_jobs.discard)
+
+    async def _capture_thumbnail(self, study_id, url):
+        try:
+            import thumbnail  # only now: the helper starts without Selenium when nobody asks for a picture
+
+            image = await asyncio.to_thread(thumbnail.capture, url)
+            await self.emit("thumbnail_ready", studyId=study_id, url=url, image=image)
+        except asyncio.CancelledError:
+            raise
+        except Exception as problem:
+            await self.emit("thumbnail_failed", studyId=study_id, url=url, reason="failed", message=str(problem))
 
     async def on_start_session(self, message):
         if self.busy:
@@ -346,10 +382,31 @@ class Connection:
             reason = await self.backend.run_task(index, url, text, duration, self.stop, self.emit)
             self.session["finished"].append(index)
             await self.emit("task_finished", index=index, reason=reason)
+            # the observer wants to watch the videos with the participant right away: make them in the background
+            video_job = asyncio.create_task(self._make_task_videos(dict(self.session), index))
+            self.video_jobs.add(video_job)
+            video_job.add_done_callback(self.video_jobs.discard)
         except asyncio.CancelledError:
             raise
         except Exception as problem:
             await self.error("task_failed", str(problem))
+
+    async def _make_task_videos(self, session, index):
+        async def progress(percent):
+            await self.emit("task_processing", index=index, percent=percent)
+
+        try:
+            async with self.video_lock:  # one task at a time: a second one would only slow both down
+                await self.emit("task_processing", index=index, percent=0)
+                videos = await self.backend.process_task_now(session, index, progress)
+            if videos:
+                await self.emit("task_processed", index=index, **videos)
+            else:  # nothing to process (mock / pretend tracker / skipped task): tell the website it can stop waiting
+                await self.emit("task_processed", index=index, heatmap=None, scanpath=None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as problem:  # the recording is safe: "Process videos" on the Results page can try again
+            await self.emit("task_process_failed", index=index, message=str(problem))
 
     async def _end_session(self):
         try:
